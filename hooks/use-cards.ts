@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { format } from "date-fns"
+import { createClient } from "@/lib/supabase/client"
 import type { Difficulty, QuestionCard, Settings } from "@/lib/types"
 import { DEFAULT_SETTINGS } from "@/lib/types"
 import { loadCards, saveCards, loadSettings, saveSettings } from "@/lib/storage"
@@ -25,13 +26,73 @@ export function useCards() {
   const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
-    setCards(loadCards())
-    setSettings(loadSettings())
-    setHydrated(true)
+    const loadData = async () => {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      
+      // Load from Supabase if authenticated, otherwise localStorage
+      if (user) {
+        const { data: questions } = await supabase
+          .from('questions')
+          .select('*')
+          .eq('user_id', user.id)
+        
+        if (questions) {
+          setCards(questions as QuestionCard[])
+        }
+      } else {
+        setCards(loadCards())
+      }
+      
+      setSettings(loadSettings())
+      setHydrated(true)
+    }
+    
+    loadData()
   }, [])
 
   useEffect(() => {
-    if (hydrated) saveCards(cards)
+    if (!hydrated || cards.length === 0) return
+    
+    // Save to Supabase if authenticated, otherwise localStorage
+    const saveToSupabase = async () => {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      
+      if (user) {
+        try {
+          for (const card of cards) {
+            const { error } = await supabase
+              .from('questions')
+              .upsert({
+                id: card.id,
+                user_id: user.id,
+                title: card.title,
+                url: card.url,
+                difficulty: card.difficulty,
+                tags: card.tags,
+                stability_score: card.stabilityScore,
+                interval_days: card.intervalDays,
+                next_revision_date: card.nextRevisionDate,
+                revision_history: card.revisionHistory,
+                source: card.source,
+              })
+            if (error) {
+              console.log("[v0] Supabase save error:", error)
+            }
+          }
+        } catch (err) {
+          console.log("[v0] Supabase save exception:", err)
+        }
+      } else {
+        // Fallback to localStorage
+        saveCards(cards)
+      }
+    }
+    
+    // Debounce saves to avoid too many requests
+    const timer = setTimeout(saveToSupabase, 1000)
+    return () => clearTimeout(timer)
   }, [cards, hydrated])
 
   useEffect(() => {
@@ -152,6 +213,25 @@ export function useCards() {
 
   const deleteCard = useCallback((id: string) => {
     setCards((prev) => prev.filter((c) => c.id !== id))
+    
+    // Delete from Supabase
+    const deleteFromSupabase = async () => {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      
+      if (user) {
+        const { error } = await supabase
+          .from('questions')
+          .delete()
+          .eq('id', id)
+          .eq('user_id', user.id)
+        
+        if (error) {
+          console.log("[v0] Delete error:", error)
+        }
+      }
+    }
+    deleteFromSupabase().catch(console.error)
   }, [])
 
   return {
